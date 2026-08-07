@@ -1,9 +1,27 @@
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
+import geekbi_temu_mcp.auth as auth
 from geekbi_temu_mcp.auth import ActionRequired, AuthManager, VERSION_HEADER
 
 
 class AuthTests(unittest.TestCase):
+    def test_default_auth_path_uses_platform_user_config_directory(self):
+        config_root = Path("/runtime-selected-config")
+        with patch.object(auth, "user_config_path", return_value=config_root) as resolver:
+            path = auth.default_auth_path()
+
+        resolver.assert_called_once_with(
+            "GeekBI",
+            appauthor=False,
+            ensure_exists=True,
+        )
+        self.assertEqual(
+            config_root / "temu-research-mcp" / "agent-auth.json",
+            path,
+        )
+
     def test_version_header_identifies_mcp_client(self):
         manager = AuthManager("https://openapi.geekbi.com")
         headers = manager._headers()

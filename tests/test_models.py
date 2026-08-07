@@ -168,7 +168,21 @@ class SearchModelTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             ReviewSearchInput(goodsId="601", page=51, size=200)
 
+    def test_every_tool_parameter_has_a_description(self):
+        for model in (
+            GoodsSearchInput,
+            ImageSearchInput,
+            MallSearchInput,
+            CategorySearchInput,
+            KeywordSearchInput,
+            ReviewSearchInput,
+        ):
+            with self.subTest(model=model.__name__):
+                self.assertEqual(
+                    [],
+                    [name for name, field in model.model_fields.items() if not field.description],
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
-

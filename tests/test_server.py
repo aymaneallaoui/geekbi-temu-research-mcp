@@ -1,8 +1,5 @@
-import asyncio
 import os
-import tempfile
 import unittest
-from pathlib import Path
 
 from mcp.client import Client
 from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -23,26 +20,24 @@ EXPECTED_TOOLS = {
 
 
 class ServerRegistrationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_tools_resources_and_prompt_are_registered(self):
+    async def test_only_data_tools_are_registered(self):
         tools = await mcp.list_tools()
         self.assertEqual(EXPECTED_TOOLS, {tool.name for tool in tools})
         self.assertTrue(all(tool.output_schema for tool in tools))
-        self.assertEqual(1, len(await mcp.list_resource_templates()))
-        self.assertEqual(["temu_market_research"], [prompt.name for prompt in await mcp.list_prompts()])
+        self.assertEqual([], await mcp.list_resource_templates())
+        self.assertEqual([], await mcp.list_prompts())
 
-    async def test_stdio_protocol_can_discover_and_call_tools(self):
-        with tempfile.TemporaryDirectory() as directory:
-            parameters = StdioServerParameters(
-                command=os.path.abspath(".venv/bin/python"),
-                args=["-m", "geekbi_temu_mcp"],
-                cwd=os.getcwd(),
-                env={"GEEKBI_MCP_AUTH_FILE": str(Path(directory) / "auth.json")},
-            )
-            async with Client(stdio_client(parameters), mode="legacy") as client:
-                tools = await client.list_tools()
+    async def test_stdio_protocol_can_discover_tools(self):
+        parameters = StdioServerParameters(
+            command=os.path.abspath(".venv/bin/python"),
+            args=["-m", "geekbi_temu_mcp"],
+            cwd=os.getcwd(),
+        )
+        async with Client(stdio_client(parameters), mode="legacy") as client:
+            tools = await client.list_tools()
 
-                self.assertEqual(EXPECTED_TOOLS, {tool.name for tool in tools.tools})
-                self.assertEqual("geekbi-temu-research", client.server_info.name)
+            self.assertEqual(EXPECTED_TOOLS, {tool.name for tool in tools.tools})
+            self.assertEqual("geekbi-temu-research", client.server_info.name)
 
 
 class ToolResultTests(unittest.TestCase):

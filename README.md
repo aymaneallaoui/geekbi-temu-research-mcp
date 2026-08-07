@@ -14,8 +14,6 @@ GeekBI Temu Research MCP 是由极鲸云（GeekBI）提供的 Temu 电商数据�
 | `temu_review_search` | 提炼真实使用场景、核心卖点、差评隐患、规格问题和改良方向 |
 | `temu_site_list` | 实时查询 Temu 国家站点、站点 ID、内部地区 ID 和币种 |
 
-服务还提供 `geekbi://guides/{topic}` 调研资源和 `temu_market_research` 综合调研 Prompt。指南主题包括 `overview`、`goods`、`image`、`mall`、`category`、`keyword` 和 `review`。
-
 ## 安装 / 更新
 
 请直接将下面这段话发送给支持 MCP 的 AI 助手。AI 会根据当前操作系统和客户端环境完成下载、依赖安装、MCP 配置以及更新：

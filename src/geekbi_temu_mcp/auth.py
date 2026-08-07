@@ -67,11 +67,8 @@ def response_message(payload: Any, fallback: str) -> str:
 
 
 def default_auth_path() -> Path:
-    configured = os.getenv("GEEKBI_MCP_AUTH_FILE", "").strip()
-    if configured:
-        return Path(configured).expanduser().resolve(strict=False)
     return (
-        user_config_path("GeekBI", appauthor=False)
+        user_config_path("GeekBI", appauthor=False, ensure_exists=True)
         / "temu-research-mcp"
         / "agent-auth.json"
     )
