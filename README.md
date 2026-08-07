@@ -22,4 +22,23 @@
 安装这个MCP: https://github.com/geekbi/geekbi-temu-research-mcp
 ```
 
+## 手动安装
+
+先安装 [uv](https://docs.astral.sh/uv/getting-started/installation/)，然后将以下 JSON 粘贴到客户端的 Stdio 服务配置中：
+
+```json
+{
+  "mcpServers": {
+    "geekbi-temu-research": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/geekbi/geekbi-temu-research-mcp@master",
+        "geekbi-temu-mcp"
+      ]
+    }
+  }
+}
+```
+
 安装完成后，重新启动客户端或新建会话即可使用。
