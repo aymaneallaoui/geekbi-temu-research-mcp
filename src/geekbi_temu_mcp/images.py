@@ -1,16 +1,21 @@
-"""图搜同款的图片读取、校验与 multipart 组装。"""
+"""Image loading, validation, and multipart encoding."""
 
 from __future__ import annotations
 
 import base64
 import binascii
 import mimetypes
+import ipaddress
+import socket
+import ssl
+from http.client import HTTPConnection, HTTPSConnection
+from urllib.error import HTTPError
 import os
 import re
 import uuid
 from pathlib import Path
-from urllib.parse import unquote, urlparse
-from urllib.request import Request, url2pathname, urlopen
+from urllib.parse import unquote, urlparse, urljoin
+from urllib.request import Request, url2pathname, urlopen, build_opener, ProxyHandler, HTTPHandler, HTTPSHandler, HTTPRedirectHandler
 
 
 MAX_IMAGE_SIZE = 10 * 1024 * 1024
@@ -58,25 +63,23 @@ def _extension(content_type: str) -> str:
 
 def _validate(data: bytes, declared: str | None = None) -> str:
     if not data:
-        raise ValueError("图片内容为空")
+        raise ValueError("Image is empty")
     if len(data) > MAX_IMAGE_SIZE:
-        raise ValueError("图片大小不能超过 10MB")
+        raise ValueError("Image must not exceed 10 MB")
     detected = _detect(data)
     declared = _content_type(declared)
     if detected:
         return detected
-    if declared and declared.startswith("image/"):
-        return declared
-    raise ValueError("无法识别图片格式，请使用常见图片文件")
+    raise ValueError("Unrecognized image format. Use a supported image file.")
 
 
 def _decode_base64(encoded: str, declared: str | None = None) -> tuple[bytes, str, str]:
     if len(encoded) > (MAX_IMAGE_SIZE * 4 // 3) + 16:
-        raise ValueError("图片大小不能超过 10MB")
+        raise ValueError("Image must not exceed 10 MB")
     try:
         data = base64.b64decode(encoded, validate=True)
     except (ValueError, binascii.Error) as error:
-        raise ValueError("图片 Base64 内容无效") from error
+        raise ValueError("Invalid Base64 image") from error
     content_type = _validate(data, declared)
     return data, content_type, "image" + _extension(content_type)
 
@@ -88,17 +91,73 @@ def _read_data_uri(source: str) -> tuple[bytes, str, str]:
         re.DOTALL,
     )
     if not match:
-        raise ValueError("图片 Data URI 格式不正确")
+        raise ValueError("Invalid image Data URI")
     return _decode_base64(match.group(2), match.group(1))
 
 
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _public_image_opener(source: str):
+    parsed = urlparse(source)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("Image URL must be HTTP(S) without credentials")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    if port not in (80, 443):
+        raise ValueError("Remote image URLs must use port 80 or 443")
+    addresses = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
+    def unsafe_address(value):
+        address = ipaddress.ip_address(value)
+        return not address.is_global or address.is_multicast or address.is_reserved
+
+    if not addresses or any(unsafe_address(item[4][0]) for item in addresses):
+        raise ValueError("Remote images must use public IP addresses; private networks are blocked")
+    pinned_ip = addresses[0][4][0]
+
+    class PinnedHTTPConnection(HTTPConnection):
+        def connect(self):
+            self.sock = socket.create_connection((pinned_ip, port), self.timeout)
+
+    class PinnedHTTPSConnection(HTTPSConnection):
+        def connect(self):
+            raw = socket.create_connection((pinned_ip, port), self.timeout)
+            try:
+                self.sock = self._context.wrap_socket(raw, server_hostname=parsed.hostname)
+            except BaseException:
+                raw.close()
+                raise
+
+    class PinnedHTTPHandler(HTTPHandler):
+        def http_open(self, req):
+            return self.do_open(PinnedHTTPConnection, req)
+
+    class PinnedHTTPSHandler(HTTPSHandler):
+        def https_open(self, req):
+            return self.do_open(PinnedHTTPSConnection, req, context=ssl.create_default_context())
+
+    return build_opener(ProxyHandler({}), _NoRedirect(), PinnedHTTPHandler(), PinnedHTTPSHandler())
+
+
 def _read_remote(source: str, timeout: float) -> tuple[bytes, str, str]:
-    request = Request(source, headers={"User-Agent": "GeekBI-Temu-Research-MCP"})
-    with urlopen(request, timeout=timeout) as response:
-        data = response.read(MAX_IMAGE_SIZE + 1)
-        content_type = _validate(data, response.headers.get_content_type())
-        filename = Path(unquote(urlparse(response.geturl()).path)).name
-        return data, content_type, filename or "image" + _extension(content_type)
+    remote = os.getenv("GEEKBI_REMOTE_MODE") == "1"
+    for _ in range(6):
+        request = Request(source, headers={"User-Agent": "GeekBI-Temu-Research-MCP"})
+        opener = _public_image_opener(source).open if remote else urlopen
+        try:
+            with opener(request, timeout=timeout) as response:
+                data = response.read(MAX_IMAGE_SIZE + 1)
+                content_type = _validate(data, response.headers.get_content_type())
+                filename = Path(unquote(urlparse(response.geturl()).path)).name
+                return data, content_type, filename or "image" + _extension(content_type)
+        except HTTPError as error:
+            location = error.headers.get("Location")
+            if not remote or error.code not in (301, 302, 303, 307, 308) or not location:
+                raise
+            source = urljoin(source, location)
+            error.close()
+    raise ValueError("Too many image URL redirects")
 
 
 def _read_local(source: str) -> tuple[bytes, str, str]:
@@ -114,10 +173,11 @@ def _read_local(source: str) -> tuple[bytes, str, str]:
     else:
         path = Path(source).expanduser()
     if not path.is_file():
-        raise ValueError(f"找不到图片文件：{path}")
+        raise ValueError(f"Image file not found: {path}")
     if path.stat().st_size > MAX_IMAGE_SIZE:
-        raise ValueError("图片大小不能超过 10MB")
-    data = path.read_bytes()
+        raise ValueError("Image must not exceed 10 MB")
+    with path.open("rb") as handle:
+        data = handle.read(MAX_IMAGE_SIZE + 1)
     guessed, _ = mimetypes.guess_type(path.name)
     return data, _validate(data, guessed), path.name
 
@@ -131,7 +191,9 @@ def read_image(source: str, timeout: float) -> tuple[bytes, str, str]:
     if parsed.scheme in {"http", "https"}:
         return _read_remote(source, timeout)
     if parsed.scheme not in {"", "file"}:
-        raise ValueError("图片只支持本地文件、file/http/https 地址、Data URI 或 Base64")
+        raise ValueError("Supported image sources: local file, file/http/https URL, Data URI, or Base64")
+    if os.getenv("GEEKBI_REMOTE_MODE") == "1":
+        raise ValueError("Local image files are disabled on the remote server; use a public URL or Base64")
     return _read_local(source)
 
 

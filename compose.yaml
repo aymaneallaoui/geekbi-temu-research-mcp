@@ -1,0 +1,42 @@
+services:
+  mcp:
+    build: .
+    restart: unless-stopped
+    environment:
+      MCP_PUBLIC_URL: https://${MCP_DOMAIN:?Set MCP_DOMAIN in .env}
+      MCP_LOGIN_EMAIL: ${MCP_LOGIN_EMAIL:?Set MCP_LOGIN_EMAIL in .env}
+      MCP_PASSWORD_HASH: ${MCP_PASSWORD_HASH:?Set MCP_PASSWORD_HASH in .env}
+      MCP_STATE_DIR: /data
+      MCP_OAUTH_REDIRECT_URIS: ${MCP_OAUTH_REDIRECT_URIS:-https://claude.ai/api/mcp/auth_callback,https://claude.com/api/mcp/auth_callback}
+      GEEKBI_REQUEST_TIMEOUT: ${GEEKBI_REQUEST_TIMEOUT:-30}
+    volumes:
+      - mcp_data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+    cpus: 1.0
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      MCP_DOMAIN: ${MCP_DOMAIN:?Set MCP_DOMAIN in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      mcp:
+        condition: service_healthy
+volumes:
+  mcp_data:
+  caddy_data:
+  caddy_config:

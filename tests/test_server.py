@@ -1,4 +1,5 @@
 import os
+import sys
 import unittest
 
 from mcp.client import Client
@@ -29,7 +30,7 @@ class ServerRegistrationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stdio_protocol_can_discover_tools(self):
         parameters = StdioServerParameters(
-            command=os.path.abspath(".venv/bin/python"),
+            command=sys.executable,
             args=["-m", "geekbi_temu_mcp"],
             cwd=os.getcwd(),
         )

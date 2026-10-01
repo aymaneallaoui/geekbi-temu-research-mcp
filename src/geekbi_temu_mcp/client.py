@@ -1,7 +1,8 @@
-"""极鲸云 Temu 数据接口客户端。"""
+"""GeekBI Temu API client."""
 
 from __future__ import annotations
 
+import math
 import os
 from typing import Any
 from urllib.parse import urlencode, urlparse
@@ -36,17 +37,19 @@ def _environment_timeout() -> float:
     try:
         timeout = float(raw)
     except ValueError as error:
-        raise GeekBIError("GEEKBI_REQUEST_TIMEOUT 必须是数字") from error
-    if timeout <= 0 or timeout > 300:
-        raise GeekBIError("请求超时时间必须大于 0 且不超过 300 秒")
+        raise GeekBIError("GEEKBI_REQUEST_TIMEOUT must be a number") from error
+    if not math.isfinite(timeout) or timeout <= 0 or timeout > 300:
+        raise GeekBIError("Request timeout must be greater than 0 and at most 300 seconds")
     return timeout
 
 
 def _base_url() -> str:
     value = os.getenv("GEEKBI_BASE_URL", DEFAULT_BASE_URL).strip().rstrip("/")
     parsed = urlparse(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise GeekBIError("GEEKBI_BASE_URL 必须是有效的 HTTP 或 HTTPS 地址")
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise GeekBIError("GEEKBI_BASE_URL must be a valid HTTP or HTTPS URL")
+    if os.getenv("GEEKBI_REMOTE_MODE") == "1" and parsed.scheme != "https":
+        raise GeekBIError("Remote GeekBI API requests require HTTPS")
     return value
 
 
@@ -72,14 +75,14 @@ class GeekBIClient:
     @staticmethod
     def _search_result(payload: Any, label: str) -> dict[str, Any]:
         if not isinstance(payload, dict):
-            raise GeekBIError(f"{label}响应格式不正确")
+            raise GeekBIError(f"{label} returned an invalid response format")
         if payload.get("code") != 0:
-            raise GeekBIError(response_message(payload, f"{label}失败"))
+            raise GeekBIError(response_message(payload, f"{label} failed"))
         data = payload.get("data")
         if not isinstance(data, dict):
-            raise GeekBIError(f"{label}响应缺少数据")
+            raise GeekBIError(f"{label} response is missing data")
         if not isinstance(data.get("list"), list):
-            raise GeekBIError(f"{label}响应缺少结果列表")
+            raise GeekBIError(f"{label} response is missing a result list")
         return {"code": 0, "data": data}
 
     def _search(self, endpoint: str, query: QueryInput, label: str) -> dict[str, Any]:
@@ -95,10 +98,10 @@ class GeekBIClient:
             self.timeout,
         )
         if payload.get("code") != 0:
-            raise GeekBIError(response_message(payload, "站点查询失败"))
+            raise GeekBIError(response_message(payload, "Site lookup failed"))
         sites = payload.get("data")
         if not isinstance(sites, list):
-            raise GeekBIError("站点查询响应缺少站点列表")
+            raise GeekBIError("Site response is missing the site list")
         valid_sites = [site for site in sites if isinstance(site, dict)]
         if country is None or not country.strip():
             return {"code": 0, "data": {"list": valid_sites}}
@@ -119,11 +122,11 @@ class GeekBIClient:
                 seen.add(key)
                 matches.append(site)
         if not matches:
-            raise GeekBIError("未找到该 Temu 站点，请确认国家或地区名称")
+            raise GeekBIError("No matching Temu site. Please confirm the country or region name.")
         return {"code": 0, "data": {"matches": matches}}
 
     def goods(self, query: GoodsSearchInput) -> dict[str, Any]:
-        return self._search(ENDPOINTS["goods"], query, "商品查询")
+        return self._search(ENDPOINTS["goods"], query, "Product search")
 
     def image(self, query: ImageSearchInput) -> dict[str, Any]:
         data, content_type, filename = read_image(query.image, max(self.timeout, 60))
@@ -135,16 +138,16 @@ class GeekBIClient:
             body=body,
             headers={"Content-Type": multipart_type},
         )
-        return self._search_result(payload, "图搜同款")
+        return self._search_result(payload, "Image search")
 
     def malls(self, query: MallSearchInput) -> dict[str, Any]:
-        return self._search(ENDPOINTS["malls"], query, "店铺查询")
+        return self._search(ENDPOINTS["malls"], query, "Store search")
 
     def categories(self, query: CategorySearchInput) -> dict[str, Any]:
-        return self._search(ENDPOINTS["categories"], query, "类目查询")
+        return self._search(ENDPOINTS["categories"], query, "Category search")
 
     def keywords(self, query: KeywordSearchInput) -> dict[str, Any]:
-        return self._search(ENDPOINTS["keywords"], query, "关键词查询")
+        return self._search(ENDPOINTS["keywords"], query, "Keyword search")
 
     def reviews(self, query: ReviewSearchInput) -> dict[str, Any]:
-        return self._search(ENDPOINTS["reviews"], query, "评论查询")
+        return self._search(ENDPOINTS["reviews"], query, "Review search")

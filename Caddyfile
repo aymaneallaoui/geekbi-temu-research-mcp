@@ -1,0 +1,9 @@
+{$MCP_DOMAIN} {
+    header Strict-Transport-Security "max-age=31536000"
+    request_body {
+        max_size 15MB
+    }
+    reverse_proxy mcp:8000 {
+        flush_interval -1
+    }
+}

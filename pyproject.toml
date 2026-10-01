@@ -5,17 +5,24 @@ build-backend = "hatchling.build"
 [project]
 name = "geekbi-temu-research-mcp"
 version = "0.1.0"
-description = "极鲸云 Temu 电商数据分析 MCP 服务"
+description = "GeekBI Temu market research MCP server"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "mcp[cli]>=2.0.0,<3.0.0",
+  "mcp[cli]>=2.2.0,<3.0.0",
   "platformdirs>=4.0,<5.0",
   "pydantic>=2.10,<3.0",
+  "uvicorn>=0.35,<1.0",
+  "python-multipart>=0.0.20,<1.0",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "httpx>=0.28,<1"]
 
 [project.scripts]
 geekbi-temu-mcp = "geekbi_temu_mcp.server:main"
+
+geekbi-password-hash = "geekbi_temu_mcp.remote:password_main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/geekbi_temu_mcp"]

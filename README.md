@@ -1,44 +1,121 @@
-# 极鲸云 Temu 数据分析与市场调研 MCP
+# GeekBI Temu Research MCP
 
-极鲸云 Temu 数据分析与市场调研 MCP 是由极鲸云（GeekBI）提供的 Temu 电商数据分析服务，通过 MCP 协议为 AI Agent 提供专业的 Temu 市场调研工具。AI 可以直接调用商品、店铺、类目、关键词和评论等数据能力，洞察市场趋势、竞品表现与消费者需求，帮助跨境卖家快速完成选品分析、市场研究和商业决策。
+An English-language MCP server for Temu product and market research, backed by [GeekBI](https://www.geekbi.com). Connect it to Claude.ai over HTTPS or run locally over stdio.
 
-## 能力
-
-| MCP 工具 | 可以解决的问题 |
+| Tool | Purpose |
 | --- | --- |
-| `temu_goods_search` | 找热销、新品和低竞争候选，比较销量、价格、供货价、评价、同款竞争和上架时间 |
-| `temu_image_search` | 用供应商图、实拍图或竞品图寻找 Temu 同款，并继续按市场指标筛选和分页 |
-| `temu_mall_search` | 研究头部店铺、新锐店铺和直接竞品，比较经营规模、动销效率和增长表现 |
-| `temu_category_search` | 判断品类市场容量、供需拥挤度、价格带、增长阶段和进入机会 |
-| `temu_keyword_search` | 分析海外买家需求、商品供给、店铺供给、增长和蓝海机会 |
-| `temu_review_search` | 提炼真实使用场景、核心卖点、差评隐患、规格问题和改良方向 |
-| `temu_site_list` | 实时查询 Temu 国家站点、站点 ID、内部地区 ID 和币种 |
+| `temu_goods_search` | Research products, sales, prices, reviews, listing dates, and competition |
+| `temu_image_search` | Find visual matches and apply product filters |
+| `temu_mall_search` | Compare stores, growth, reputation, and sell-through |
+| `temu_category_search` | Discover category IDs, market size, demand, and supply |
+| `temu_keyword_search` | Research keyword demand, growth, and competition |
+| `temu_review_search` | Analyze a product's reviews, specifications, strengths, and complaints |
+| `temu_site_list` | Look up country sites, IDs, and currencies |
 
-## 安装 / 更新
+The default site is the United States (ID 48). Supply prices are always CNY; sale prices and revenue use the selected site's currency. Tool names and upstream field names are preserved for API compatibility. Documentation, tool schemas, instructions, login, and locally generated errors are English. Upstream data and GeekBI pages can contain Chinese; Claude is instructed to explain them in English without altering raw records.
 
-请直接将下面这段话发送给支持 MCP 的 AI 助手。AI 会根据当前操作系统和客户端环境完成下载、依赖安装、MCP 配置以及更新：
+## Authentication
 
-```text
-安装这个MCP: https://github.com/geekbi/geekbi-temu-research-mcp
-```
+The remote server has **one configured email/password account and no user signup**. Claude.ai uses an OAuth authorization-code flow with S256 PKCE to open the sign-in page, then sends bearer tokens to `/mcp`. HTTP Basic authentication alone does not implement that connector flow.
 
-## 手动安装
+OAuth client registration at `/register` registers connector software, **not user accounts**. It accepts only exact callback URLs from `MCP_OAUTH_REDIRECT_URIS`. Both documented Claude callback domains are allowed by default. Passwords use salted scrypt hashes; access tokens last one hour; refresh tokens rotate and last 30 days. OAuth state survives restarts in SQLite. Changing the email, password hash, or public URL invalidates existing authorizations on startup. SDK handlers validate client credentials, PKCE, code expiry, and redirect matching.
 
-先安装 [uv](https://docs.astral.sh/uv/getting-started/installation/)，然后将以下 JSON 粘贴到客户端的 Stdio 服务配置中：
+Your server login is separate from **GeekBI's own account and subscription**. After connecting, the first data query may return a GeekBI sign-in or purchase link. Open that link, finish the required action, then ask Claude to repeat the same query. This deployment shares one GeekBI account across the configured owner account; it is not a multi-user service.
+
+## Deploy with Docker Compose
+
+Requirements: a Linux host with Docker Compose, a domain pointing to its public IP, and inbound TCP ports 80 and 443 open. Caddy provisions and renews HTTPS certificates. If you publish an AAAA DNS record, its IPv6 address must also reach the host.
+
+1. Clone and install locally to generate the password hash:
+
+   ```sh
+   git clone https://github.com/aymaneallaoui/geekbi-temu-research-mcp.git
+   cd geekbi-temu-research-mcp
+   uv venv --python 3.12
+   uv pip install -r requirements.lock
+   uv pip install --no-deps -e .
+   .venv/bin/geekbi-password-hash
+   ```
+
+   The generator prompts twice; choose at least 12 characters. Alternatively build the image and run `docker compose run --rm --no-deps --entrypoint geekbi-password-hash mcp` after creating a temporary `.env` from the example.
+
+2. Copy `.env.example` to `.env`. Set your domain, login email, and generated password hash. Keep the hash **inside single quotes** so Compose preserves its dollar signs. Protect the file:
+
+   ```sh
+   cp .env.example .env
+   chmod 600 .env
+   ```
+
+   Edit `.env` using an editor; no password or secret is included in this repository.
+
+3. Start the server:
+
+   ```sh
+   docker compose up -d --build
+   docker compose ps
+   curl --fail https://YOUR_DOMAIN/healthz
+   curl -i https://YOUR_DOMAIN/mcp
+   ```
+
+   Health returns `{"status":"ok"}`. An unauthenticated MCP request returns **401** and a `WWW-Authenticate` header pointing to resource metadata. This is expected. The service binds only inside Docker; Caddy is the public entry point. Authentication and GeekBI login persist in the `mcp_data` volume. Use a single replica/worker; rate limits and device-login synchronization are process-local. Tool execution is capped at eight concurrent calls, and the CLI limits simultaneous HTTP connections/tasks to 16.
+
+4. In Claude.ai, open **Settings → Connectors → Add custom connector** (organization owners use Organization settings). Enter `https://YOUR_DOMAIN/mcp`, add it, and complete the sign-in page with your configured email/password. Leave advanced client ID/secret empty; the connector registers its OAuth client automatically. Enable the connector for your conversation and ask Claude to list Temu sites or research a product.
+
+5. If a tool returns a GeekBI action link, complete that separately and retry the same tool. A successful connector login does not grant a GeekBI subscription.
+
+Do not delete the persistent volume during upgrades. Update with `git pull` and `docker compose up -d --build`. Back up the `mcp_data` volume with the MCP service stopped so SQLite and upstream credentials form a consistent snapshot; protect backups as secrets. To revoke all connector sessions without changing the password, stop the service, delete only `/data/oauth.sqlite3` inside the volume, and start it again (clients must reconnect). Preserve `/data/geekbi-auth.json`.
+
+## Other hosting platforms
+
+Build the Dockerfile, attach a persistent writable volume at `/data`, publish port 8000 behind the platform's HTTPS proxy, and configure:
+
+| Variable | Meaning |
+| --- | --- |
+| `MCP_PUBLIC_URL` | Exact HTTPS origin, e.g. `https://mcp.example.com`, without `/mcp` |
+| `MCP_LOGIN_EMAIL` | The single account's email |
+| `MCP_PASSWORD_HASH` | Literal generated scrypt hash; no shell quotes in a hosting dashboard |
+| `MCP_STATE_DIR` | Writable persistent directory; defaults to `/data` |
+| `MCP_OAUTH_REDIRECT_URIS` | Comma-separated exact callbacks; defaults to Claude's two callbacks |
+| `GEEKBI_REQUEST_TIMEOUT` | Upstream timeout in seconds, greater than 0 and at most 300; default 30 |
+| `GEEKBI_BASE_URL` | Optional upstream API override; default `https://openapi.geekbi.com`; remote mode requires HTTPS |
+| `GEEKBI_AUTH_PATH` | Upstream credential path in stdio mode; remote mode uses `MCP_STATE_DIR/geekbi-auth.json` |
+
+Remote startup fails if account settings are missing or invalid. HTTP public URLs are accepted only on loopback for development. The health endpoint is `/healthz`; OAuth discovery is `/.well-known/oauth-authorization-server` and `/.well-known/oauth-protected-resource/mcp`. Avoid adding another proxy login in front of these routes: Claude must reach discovery, registration, and OAuth endpoints.
+
+## Local stdio
+
+After installation, configure an MCP-compatible desktop client with an absolute executable path:
 
 ```json
 {
   "mcpServers": {
     "geekbi-temu-research": {
-      "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/geekbi/geekbi-temu-research-mcp@master",
-        "geekbi-temu-mcp"
-      ]
+      "command": "/absolute/path/geekbi-temu-research-mcp/.venv/bin/geekbi-temu-mcp"
     }
   }
 }
 ```
 
-安装完成后，重新启动客户端或新建会话即可使用。
+Stdio uses GeekBI's existing device login and does not require the remote owner account. Local image paths are supported only in stdio mode. Remote images accept public HTTP(S) URLs on ports 80/443, Data URIs, or `base64:` data up to 10 MB. Private/nonpublic addresses, redirects to private networks, and local files are blocked remotely. Remote requests resolve and pin the validated public IP and verify TLS certificates.
+
+## Development and verification
+
+Python 3.12 is the tested deployment runtime. `requirements.lock` pins production dependencies for that runtime; `pyproject.toml` retains library version ranges.
+
+```sh
+uv pip install -e '.[dev]'
+.venv/bin/pytest -q
+uv pip compile --python-version 3.12 pyproject.toml -o requirements.lock
+```
+
+Tests cover tool schemas, stdio discovery, query serialization, validation, images, and the remote login/OAuth/MCP flow. See [REVIEW.md](REVIEW.md) for fixes and validation limits. Do a live Claude.ai connection after deployment; local protocol tests cannot verify public DNS, TLS, hosting configuration, or your GeekBI entitlement.
+
+## Documentation consulted
+
+- [Claude custom remote connectors](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)
+- [Building Claude MCP connectors and callback URLs](https://support.anthropic.com/en/articles/11503834-building-custom-connectors-via-remote-mcp-servers)
+- [MCP authorization, PKCE, resource metadata, and audience validation](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization)
+- [Official Python SDK deployment guidance](https://py.sdk.modelcontextprotocol.io/run/deploy/)
+
+- [Caddy request body limits](https://caddyserver.com/docs/caddyfile/directives/request_body)
+- [Docker Compose environment quoting](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/)

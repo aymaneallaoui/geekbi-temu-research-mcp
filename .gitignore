@@ -9,3 +9,9 @@ build/
 .DS_Store
 .geekbi/
 
+.env
+.env.*
+!.env.example
+.ruff_cache/
+*.sqlite3*
+data/

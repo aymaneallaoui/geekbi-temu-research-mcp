@@ -1,4 +1,4 @@
-"""极鲸云网页登录状态与受保护请求封装。"""
+"""GeekBI login state and authenticated requests."""
 
 from __future__ import annotations
 
@@ -11,21 +11,40 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator
 from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.request import Request, HTTPRedirectHandler, build_opener
+from urllib.parse import urlsplit
 
 from platformdirs import user_config_path
 
 from . import __version__
 
 
+class _SameOriginRedirect(HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        old, new = urlsplit(request.full_url), urlsplit(newurl)
+        def origin(url):
+            return url.scheme, url.hostname, url.port or (443 if url.scheme == "https" else 80)
+        if origin(old) != origin(new):
+            raise GeekBIError("GeekBI redirected to a different origin; request blocked")
+        return super().redirect_request(request, fp, code, msg, headers, newurl)
+
+
+_UPSTREAM_OPENER = build_opener(_SameOriginRedirect())
+
+
+def urlopen(request, timeout):
+    return _UPSTREAM_OPENER.open(request, timeout=timeout)
+
+
 TOKEN_ENDPOINT = "/api/v1/agent/auth/token"
 VERSION_HEADER = "X-GeekBI-MCP-Version"
 STATE_VERSION = 1
 _PROCESS_LOCK = threading.RLock()
+_LOGIN_LOCK = threading.RLock()
 
 
 class GeekBIError(Exception):
-    """可直接向用户展示中文消息的极鲸云请求错误。"""
+    """A GeekBI request error with a user-facing message."""
 
 
 class ActionRequired(Exception):
@@ -67,6 +86,8 @@ def response_message(payload: Any, fallback: str) -> str:
 
 
 def default_auth_path() -> Path:
+    if configured := os.getenv("GEEKBI_AUTH_PATH"):
+        return Path(configured)
     return (
         user_config_path("GeekBI", appauthor=False, ensure_exists=True)
         / "temu-research-mcp"
@@ -140,7 +161,7 @@ def _read_state(path: Path) -> dict[str, Any]:
     try:
         return _normalize_state(json.loads(path.read_text(encoding="utf-8")))
     except (OSError, ValueError) as error:
-        raise GeekBIError("无法读取极鲸云登录状态") from error
+        raise GeekBIError("Unable to read GeekBI login state") from error
 
 
 def _write_state(path: Path, payload: dict[str, Any]) -> None:
@@ -165,7 +186,7 @@ def _write_state(path: Path, payload: dict[str, Any]) -> None:
         temporary = None
         _restrict_permissions(path, 0o600)
     except OSError as error:
-        raise GeekBIError("无法保存极鲸云登录状态") from error
+        raise GeekBIError("Unable to save GeekBI login state") from error
     finally:
         if temporary is not None:
             try:
@@ -207,17 +228,20 @@ class AuthManager:
     @staticmethod
     def _read_json_response(response: Any) -> dict[str, Any]:
         try:
-            payload = json.loads(response.read().decode("utf-8"))
+            data = response.read(20 * 1024 * 1024 + 1)
+            if len(data) > 20 * 1024 * 1024:
+                raise GeekBIError("GeekBI response exceeds the 20 MB limit")
+            payload = json.loads(data.decode("utf-8"))
         except (UnicodeDecodeError, ValueError) as error:
-            raise GeekBIError("极鲸云返回了无法解析的数据") from error
+            raise GeekBIError("GeekBI returned invalid JSON") from error
         if not isinstance(payload, dict):
-            raise GeekBIError("极鲸云返回的数据格式不正确")
+            raise GeekBIError("GeekBI returned an invalid response format")
         return payload
 
     @staticmethod
     def _read_http_error(error: HTTPError) -> dict[str, Any] | None:
         try:
-            payload = json.loads(error.read().decode("utf-8"))
+            payload = json.loads(error.read(1024 * 1024).decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
             return None
         return payload if isinstance(payload, dict) else None
@@ -244,7 +268,7 @@ class AuthManager:
         if not isinstance(jump_url, str) or not jump_url:
             return
         raise ActionRequired(
-            response_message(payload, "请完成页面操作后继续"),
+            response_message(payload, "Complete the action on the linked page before continuing"),
             jump_url,
             action=str(data.get("error") or "ACTION_REQUIRED"),
             expires_in=int(data.get("expiresIn", 0)),
@@ -266,13 +290,13 @@ class AuthManager:
     def _save_challenge(self, payload: dict[str, Any]) -> None:
         data = payload.get("data")
         if not isinstance(data, dict):
-            raise GeekBIError(response_message(payload, "需要登录后继续"))
+            raise GeekBIError(response_message(payload, "Sign in to continue"))
         device_code = data.get("deviceCode")
         jump_url = data.get("jumpUrl")
         if not isinstance(device_code, str) or not device_code:
-            raise GeekBIError("登录响应缺少设备码")
+            raise GeekBIError("Login response is missing a device code")
         if not isinstance(jump_url, str) or not jump_url:
-            raise GeekBIError("登录响应缺少跳转地址")
+            raise GeekBIError("Login response is missing a login URL")
         expires_in = int(data.get("expiresIn", 0))
 
         def save(state: dict[str, Any]) -> tuple[bool, None]:
@@ -288,7 +312,7 @@ class AuthManager:
 
         self._mutate(save)
         raise ActionRequired(
-            response_message(payload, "需要登录后继续"),
+            response_message(payload, "Sign in to continue"),
             jump_url,
             action="AUTH_REQUIRED",
             expires_in=expires_in,
@@ -324,7 +348,7 @@ class AuthManager:
             error_code = data.get("error") if isinstance(data, dict) else None
             if error.code == 202 or error_code == "AUTHORIZATION_PENDING":
                 raise ActionRequired(
-                    "等待用户完成网页登录。完成后请再次调用原查询。",
+                    "Waiting for you to finish signing in. Then retry the original query.",
                     str(pending.get("jumpUrl") or ""),
                     action="AUTH_REQUIRED",
                     expires_in=max(0, int(pending.get("expiresAt", now)) - now),
@@ -336,22 +360,22 @@ class AuthManager:
             }:
                 self._remove_pending(str(pending.get("deviceCode") or ""))
                 return False
-            raise GeekBIError(response_message(payload, "登录状态查询失败")) from error
+            raise GeekBIError(response_message(payload, "Unable to check login status")) from error
 
         data = payload.get("data")
         if isinstance(data, dict) and data.get("error") == "AUTHORIZATION_PENDING":
             raise ActionRequired(
-                "等待用户完成网页登录。完成后请再次调用原查询。",
+                "Waiting for you to finish signing in. Then retry the original query.",
                 str(pending.get("jumpUrl") or ""),
                 action="AUTH_REQUIRED",
                 expires_in=max(0, int(pending.get("expiresAt", now)) - now),
                 pending=True,
             )
         if payload.get("code") != 0 or not isinstance(data, dict):
-            raise GeekBIError(response_message(payload, "登录令牌响应异常"))
+            raise GeekBIError(response_message(payload, "Invalid login token response"))
         access_token = data.get("accessToken")
         if not isinstance(access_token, str) or not access_token:
-            raise GeekBIError("登录令牌响应缺少访问令牌")
+            raise GeekBIError("Login response is missing an access token")
         expires_in = int(data.get("expiresIn", 0))
 
         def save_token(state: dict[str, Any]) -> tuple[bool, bool]:
@@ -381,7 +405,14 @@ class AuthManager:
 
         self._mutate(remove)
 
-    def request_json(
+    def request_json(self, url: str, timeout: float, **kwargs: Any) -> dict[str, Any]:
+        # Only the device-login handshake is serialized. Authenticated data queries can run concurrently.
+        if self._authorization_header():
+            return self._request_json(url, timeout, **kwargs)
+        with _LOGIN_LOCK:
+            return self._request_json(url, timeout, **kwargs)
+
+    def _request_json(
         self,
         url: str,
         timeout: float,
@@ -407,6 +438,6 @@ class AuthManager:
             if error.code == 401 and isinstance(data, dict) and data.get("error") == "AUTH_REQUIRED":
                 self._save_challenge(payload)
             self._raise_action_if_needed(payload)
-            raise GeekBIError(response_message(payload, "极鲸云请求失败")) from error
+            raise GeekBIError(response_message(payload, "GeekBI request failed")) from error
         self._raise_action_if_needed(payload)
         return payload
