@@ -18,7 +18,7 @@ The default site is the United States (ID 48). Supply prices are always CNY; sal
 
 The remote server has **one configured email/password account and no user signup**. Claude.ai uses an OAuth authorization-code flow with S256 PKCE to open the sign-in page, then sends bearer tokens to `/mcp`. HTTP Basic authentication alone does not implement that connector flow.
 
-OAuth client registration at `/register` registers connector software, **not user accounts**. It accepts only exact callback URLs from `MCP_OAUTH_REDIRECT_URIS`. Both documented Claude callback domains are allowed by default. Passwords use salted scrypt hashes; access tokens last one hour; refresh tokens rotate and last 30 days. OAuth state survives restarts in SQLite. Changing the email, password hash, or public URL invalidates existing authorizations on startup. SDK handlers validate client credentials, PKCE, code expiry, and redirect matching.
+OAuth client registration at `/register` registers connector software, **not user accounts**. It accepts only exact callback URLs from `MCP_OAUTH_REDIRECT_URIS`. Both documented Claude callback domains are allowed by default. Passwords use salted scrypt hashes; access tokens last one hour; refresh tokens rotate and last 30 days. OAuth state survives restarts in SQLite. Changing the email, password hash, or public URL invalidates existing authorizations on startup; a restart with the same stored password does not. SDK handlers validate client credentials, PKCE, code expiry, and redirect matching.
 
 Your server login is separate from **GeekBI's own account and subscription**. After connecting, the first data query may return a GeekBI sign-in or purchase link. Open that link, finish the required action, then ask Claude to repeat the same query. This deployment shares one GeekBI account across the configured owner account; it is not a multi-user service.
 
@@ -26,29 +26,18 @@ Your server login is separate from **GeekBI's own account and subscription**. Af
 
 Requirements: a Linux host with Docker Compose, a domain pointing to its public IP, and inbound TCP ports 80 and 443 open. Caddy provisions and renews HTTPS certificates. If you publish an AAAA DNS record, its IPv6 address must also reach the host.
 
-1. Clone and install locally to generate the password hash:
+1. Clone the repository, copy `.env.example` to `.env`, and set your domain and login email. Protect the file:
 
    ```sh
    git clone https://github.com/aymaneallaoui/geekbi-temu-research-mcp.git
    cd geekbi-temu-research-mcp
-   uv venv --python 3.12
-   uv pip install -r requirements.lock
-   uv pip install --no-deps -e .
-   .venv/bin/geekbi-password-hash
-   ```
-
-   The generator prompts twice; choose at least 12 characters. Alternatively build the image and run `docker compose run --rm --no-deps --entrypoint geekbi-password-hash mcp` after creating a temporary `.env` from the example.
-
-2. Copy `.env.example` to `.env`. Set your domain, login email, and generated password hash. Keep the hash **inside single quotes** so Compose preserves its dollar signs. Protect the file:
-
-   ```sh
    cp .env.example .env
    chmod 600 .env
    ```
 
-   Edit `.env` using an editor; no password or secret is included in this repository.
+   Edit `.env` using an editor; no password or secret is included in this repository. Leave `MCP_PASSWORD_HASH` unset to let the server generate the owner password (step 3). To choose your own instead, install locally (`uv venv --python 3.12 && uv pip install -r requirements.lock && uv pip install --no-deps -e .`), run `.venv/bin/geekbi-password-hash`, and set the printed hash in `.env` **inside single quotes** so Compose preserves its dollar signs.
 
-3. Start the server:
+2. Start the server:
 
    ```sh
    docker compose up -d --build
@@ -59,11 +48,19 @@ Requirements: a Linux host with Docker Compose, a domain pointing to its public 
 
    Health returns `{"status":"ok"}`. An unauthenticated MCP request returns **401** and a `WWW-Authenticate` header pointing to resource metadata. This is expected. The service binds only inside Docker; Caddy is the public entry point. Authentication and GeekBI login persist in the `mcp_data` volume. Use a single replica/worker; rate limits and device-login synchronization are process-local. Tool execution is capped at eight concurrent calls, and the CLI limits simultaneous HTTP connections/tasks to 16.
 
+3. If `MCP_PASSWORD_HASH` is unset, the first start generates a random owner password, stores only its scrypt hash in `/data/owner-password.json` (mode 600), and prints the password once:
+
+   ```sh
+   docker compose logs mcp | grep "GENERATED OWNER PASSWORD"
+   ```
+
+   Save it in a password manager. Later starts reuse the stored hash and print nothing secret. If you lose it or want a new one, rotate it: run `docker compose exec mcp rm /data/owner-password.json`, then `docker compose restart mcp`, and read the new password from the logs. Rotation signs out existing connector sessions.
+
 4. In Claude.ai, open **Settings → Connectors → Add custom connector** (organization owners use Organization settings). Enter `https://YOUR_DOMAIN/mcp`, add it, and complete the sign-in page with your configured email/password. Leave advanced client ID/secret empty; the connector registers its OAuth client automatically. Enable the connector for your conversation and ask Claude to list Temu sites or research a product.
 
 5. If a tool returns a GeekBI action link, complete that separately and retry the same tool. A successful connector login does not grant a GeekBI subscription.
 
-Do not delete the persistent volume during upgrades. Update with `git pull` and `docker compose up -d --build`. Back up the `mcp_data` volume with the MCP service stopped so SQLite and upstream credentials form a consistent snapshot; protect backups as secrets. To revoke all connector sessions without changing the password, stop the service, delete only `/data/oauth.sqlite3` inside the volume, and start it again (clients must reconnect). Preserve `/data/geekbi-auth.json`.
+Do not delete the persistent volume during upgrades; it also holds the generated owner password hash. Update with `git pull` and `docker compose up -d --build`. Back up the `mcp_data` volume with the MCP service stopped so SQLite and upstream credentials form a consistent snapshot; protect backups as secrets. To revoke all connector sessions without changing the password, stop the service, delete only `/data/oauth.sqlite3` inside the volume, and start it again (clients must reconnect). Preserve `/data/geekbi-auth.json`.
 
 ## Other hosting platforms
 
@@ -73,14 +70,14 @@ Build the Dockerfile, attach a persistent writable volume at `/data`, publish po
 | --- | --- |
 | `MCP_PUBLIC_URL` | Exact HTTPS origin, e.g. `https://mcp.example.com`, without `/mcp` |
 | `MCP_LOGIN_EMAIL` | The single account's email |
-| `MCP_PASSWORD_HASH` | Literal generated scrypt hash; no shell quotes in a hosting dashboard |
+| `MCP_PASSWORD_HASH` | Optional literal `geekbi-password-hash` scrypt hash; no shell quotes in a hosting dashboard. When unset, the server generates a password, stores its hash in `MCP_STATE_DIR/owner-password.json`, and prints the password once to the startup log; delete that file and restart to rotate |
 | `MCP_STATE_DIR` | Writable persistent directory; defaults to `/data` |
 | `MCP_OAUTH_REDIRECT_URIS` | Comma-separated exact callbacks; defaults to Claude's two callbacks |
 | `GEEKBI_REQUEST_TIMEOUT` | Upstream timeout in seconds, greater than 0 and at most 300; default 30 |
 | `GEEKBI_BASE_URL` | Optional upstream API override; default `https://openapi.geekbi.com`; remote mode requires HTTPS |
 | `GEEKBI_AUTH_PATH` | Upstream credential path in stdio mode; remote mode uses `MCP_STATE_DIR/geekbi-auth.json` |
 
-Remote startup fails if account settings are missing or invalid. HTTP public URLs are accepted only on loopback for development. The health endpoint is `/healthz`; OAuth discovery is `/.well-known/oauth-authorization-server` and `/.well-known/oauth-protected-resource/mcp`. Avoid adding another proxy login in front of these routes: Claude must reach discovery, registration, and OAuth endpoints.
+Remote startup fails if account settings are missing or invalid, or if a stored `owner-password.json` is unreadable. HTTP public URLs are accepted only on loopback for development. The health endpoint is `/healthz`; OAuth discovery is `/.well-known/oauth-authorization-server` and `/.well-known/oauth-protected-resource/mcp`. Avoid adding another proxy login in front of these routes: Claude must reach discovery, registration, and OAuth endpoints.
 
 ## Local stdio
 

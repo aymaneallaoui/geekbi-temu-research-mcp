@@ -8,12 +8,14 @@ from contextlib import contextmanager
 import hashlib
 import hmac
 import html
+import json
 import os
 import secrets
 import sqlite3
+import sys
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -32,6 +34,7 @@ from starlette.routing import Route
 
 SCOPE = "temu:read"
 DEFAULT_REDIRECTS = "https://claude.ai/api/mcp/auth_callback,https://claude.com/api/mcp/auth_callback"
+OWNER_PASSWORD_FILE = "owner-password.json"
 
 
 def hash_password(password: str) -> str:
@@ -63,6 +66,39 @@ def password_main() -> None:
     print(hash_password(first))
 
 
+def load_owner_password_hash(state_dir: Path) -> str | None:
+    path = state_dir / OWNER_PASSWORD_FILE
+    try:
+        encoded = json.loads(path.read_text())["password_hash"]
+    except FileNotFoundError:
+        return None
+    except (ValueError, KeyError, TypeError) as error:
+        raise ValueError(f"{path} is unreadable; delete it to generate a new owner password") from error
+    if not isinstance(encoded, str):
+        raise ValueError(f"{path} is unreadable; delete it to generate a new owner password")
+    return encoded
+
+
+def store_owner_password_hash(state_dir: Path, encoded: str) -> bool:
+    """Persist only the hash, readable by the owner alone. Returns False if a hash is already stored."""
+    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = state_dir / OWNER_PASSWORD_FILE
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return False
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            json.dump({"password_hash": encoded}, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    return True
+
+
 @dataclass(frozen=True)
 class RemoteConfig:
     public_url: str
@@ -86,7 +122,7 @@ class RemoteConfig:
         except ValueError:
             valid_hash = False
         if not valid_hash:
-            raise ValueError("Set MCP_PASSWORD_HASH using geekbi-password-hash")
+            raise ValueError("MCP_PASSWORD_HASH must be a geekbi-password-hash scrypt hash; leave it unset to generate one")
         if not self.redirect_uris:
             raise ValueError("At least one exact MCP_OAUTH_REDIRECT_URIS callback is required")
         for uri in self.redirect_uris:
@@ -98,13 +134,26 @@ class RemoteConfig:
 
     @classmethod
     def from_env(cls):
-        return cls(
+        state_dir = Path(os.environ.get("MCP_STATE_DIR", "/data"))
+        password_hash = os.environ.get("MCP_PASSWORD_HASH", "").strip()
+        generated = None
+        if not password_hash:
+            password_hash = load_owner_password_hash(state_dir)
+            if password_hash is None:
+                generated = secrets.token_urlsafe(24)
+                password_hash = hash_password(generated)
+        config = cls(
             public_url=os.environ.get("MCP_PUBLIC_URL", "").strip().rstrip("/"),
             email=os.environ.get("MCP_LOGIN_EMAIL", "").strip().casefold(),
-            password_hash=os.environ.get("MCP_PASSWORD_HASH", ""),
-            state_dir=Path(os.environ.get("MCP_STATE_DIR", "/data")),
+            password_hash=password_hash,
+            state_dir=state_dir,
             redirect_uris=tuple(x.strip() for x in os.environ.get("MCP_OAUTH_REDIRECT_URIS", DEFAULT_REDIRECTS).split(",") if x.strip()),
         )
+        if generated:
+            if not store_owner_password_hash(state_dir, password_hash):
+                return replace(config, password_hash=load_owner_password_hash(state_dir))
+            print(f"GENERATED OWNER PASSWORD (shown only once, save it now; sign in as {config.email}): {generated}", file=sys.stderr, flush=True)
+        return config
 
     @property
     def resource(self):

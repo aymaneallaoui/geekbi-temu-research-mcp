@@ -1,8 +1,10 @@
 import base64
 import hashlib
+import json
 import re
 from urllib.parse import parse_qs, urlsplit
 
+import anyio
 import httpx
 import pytest
 
@@ -29,7 +31,7 @@ async def register(client, redirect=CALLBACK):
     return await client.post("/register", json={"client_name": "Claude", "redirect_uris": [redirect], "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"], "token_endpoint_auth_method": "client_secret_post"})
 
 
-async def login_code(client, credentials):
+async def login_code(client, credentials, password=PASSWORD):
     verifier = "a" * 64
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
     response = await client.get("/authorize", params={"client_id": credentials["client_id"], "redirect_uri": CALLBACK, "response_type": "code", "code_challenge": challenge, "code_challenge_method": "S256", "scope": "temu:read", "resource": "https://mcp.example.com/mcp", "state": "client-state"})
@@ -38,7 +40,7 @@ async def login_code(client, credentials):
     page = await client.get(login_url)
     assert page.status_code == 200
     csrf = re.search('name="csrf" value="([^"]+)"', page.text).group(1)
-    form = {"csrf": csrf, "email": "owner@example.com", "password": PASSWORD}
+    form = {"csrf": csrf, "email": "owner@example.com", "password": password}
     denied = await client.post(login_url, data={**form, "csrf": "wrong"})
     assert denied.status_code == 403
     denied = await client.post(login_url, data={**form, "password": "wrong-password"})
@@ -119,3 +121,88 @@ def test_configuration_fails_closed(tmp_path):
         RemoteConfig("http://public.example", "owner@example.com", hash_password(PASSWORD), tmp_path, (CALLBACK,))
     with pytest.raises(ValueError):
         RemoteConfig("https://public.example", "owner@example.com", "plaintext-password", tmp_path, (CALLBACK,))
+
+
+@pytest.fixture
+def generated_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("GEEKBI_REMOTE_MODE", "0")
+    monkeypatch.setenv("GEEKBI_AUTH_PATH", str(tmp_path / "old-auth.json"))
+    monkeypatch.setenv("MCP_PUBLIC_URL", "https://mcp.example.com")
+    monkeypatch.setenv("MCP_LOGIN_EMAIL", "owner@example.com")
+    monkeypatch.setenv("MCP_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("MCP_PASSWORD_HASH", raising=False)
+    return tmp_path / "state" / "owner-password.json"
+
+
+def generated_password(output):
+    found = re.findall(r"GENERATED OWNER PASSWORD .*: (\S+)$", output, re.MULTILINE)
+    assert len(found) == 1, output
+    return found[0]
+
+
+def load_token(provider, token):
+    return anyio.run(provider.load_access_token, token)
+
+
+def test_generated_password_persists_and_tokens_survive_restart(generated_env, capsys):
+    from geekbi_temu_mcp.remote import OAuthProvider, verify_password
+    first = RemoteConfig.from_env()
+    password = generated_password(capsys.readouterr().err)
+    assert len(password) >= 32 and verify_password(password, first.password_hash)
+    assert generated_env.stat().st_mode & 0o777 == 0o600
+    stored = generated_env.read_text()
+    assert password not in stored and json.loads(stored) == {"password_hash": first.password_hash}
+    tokens = OAuthProvider(first).issue("test-client", ["temu:read"])
+    second = RemoteConfig.from_env()
+    assert second.password_hash == first.password_hash
+    assert password not in capsys.readouterr().err
+    assert load_token(OAuthProvider(second), tokens.access_token)
+
+
+def test_deleting_stored_hash_rotates_password(generated_env, capsys):
+    from geekbi_temu_mcp.remote import OAuthProvider
+    first = RemoteConfig.from_env()
+    old_password = generated_password(capsys.readouterr().err)
+    tokens = OAuthProvider(first).issue("test-client", ["temu:read"])
+    generated_env.unlink()
+    rotated = RemoteConfig.from_env()
+    assert generated_password(capsys.readouterr().err) != old_password
+    assert rotated.password_hash != first.password_hash
+    assert not load_token(OAuthProvider(rotated), tokens.access_token)
+
+
+def test_explicit_password_hash_wins(generated_env, capsys, monkeypatch):
+    explicit = hash_password(PASSWORD)
+    monkeypatch.setenv("MCP_PASSWORD_HASH", explicit)
+    assert RemoteConfig.from_env().password_hash == explicit
+    assert not generated_env.exists()
+    assert "PASSWORD" not in capsys.readouterr().err
+    monkeypatch.delenv("MCP_PASSWORD_HASH")
+    generated = RemoteConfig.from_env()
+    monkeypatch.setenv("MCP_PASSWORD_HASH", explicit)
+    assert RemoteConfig.from_env().password_hash == explicit != generated.password_hash
+
+
+def test_invalid_configuration_does_not_consume_generated_password(generated_env, capsys, monkeypatch):
+    monkeypatch.setenv("MCP_PUBLIC_URL", "http://public.example")
+    with pytest.raises(ValueError):
+        RemoteConfig.from_env()
+    assert not generated_env.exists()
+    assert "PASSWORD" not in capsys.readouterr().err
+    generated_env.parent.mkdir()
+    generated_env.write_text("not json")
+    monkeypatch.setenv("MCP_PUBLIC_URL", "https://mcp.example.com")
+    with pytest.raises(ValueError, match="delete it"):
+        RemoteConfig.from_env()
+
+
+@pytest.mark.anyio
+async def test_login_with_generated_password(generated_env, capsys):
+    config = RemoteConfig.from_env()
+    password = generated_password(capsys.readouterr().err)
+    app = create_app(config)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=config.public_url) as client:
+            credentials = (await register(client)).json()
+            code, _ = await login_code(client, credentials, password)
+            assert code

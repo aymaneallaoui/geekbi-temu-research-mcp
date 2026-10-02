@@ -5,7 +5,7 @@ services:
     environment:
       MCP_PUBLIC_URL: https://${MCP_DOMAIN:?Set MCP_DOMAIN in .env}
       MCP_LOGIN_EMAIL: ${MCP_LOGIN_EMAIL:?Set MCP_LOGIN_EMAIL in .env}
-      MCP_PASSWORD_HASH: ${MCP_PASSWORD_HASH:?Set MCP_PASSWORD_HASH in .env}
+      MCP_PASSWORD_HASH: ${MCP_PASSWORD_HASH:-}
       MCP_STATE_DIR: /data
       MCP_OAUTH_REDIRECT_URIS: ${MCP_OAUTH_REDIRECT_URIS:-https://claude.ai/api/mcp/auth_callback,https://claude.com/api/mcp/auth_callback}
       GEEKBI_REQUEST_TIMEOUT: ${GEEKBI_REQUEST_TIMEOUT:-30}
