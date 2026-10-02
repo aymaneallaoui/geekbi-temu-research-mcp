@@ -327,9 +327,11 @@ class OAuthProvider:
 
 
 class SecurityHeaders:
-    def __init__(self, app):
+    def __init__(self, app, redirect_uris=()):
         self.app = app
         self.windows: dict[str, deque[float]] = {}
+        origins = dict.fromkeys(f"{target.scheme}://{target.netloc.lower()}" for target in map(urlsplit, redirect_uris))
+        self.login_form_action = " ".join(["'self'", *origins])
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -345,11 +347,12 @@ class SecurityHeaders:
             if len(window) >= limit:
                 return await JSONResponse({"error": "rate_limited"}, status_code=429, headers={"Retry-After": "60"})(scope, receive, send)
             window.append(now)
+        form_action = self.login_form_action if path == "/login" else "'self'"
         async def secure_send(message):
             if message["type"] == "http.response.start":
                 headers = list(message.get("headers", []))
                 headers = [(key, value) for key, value in headers if key.lower() != b"cache-control"]
-                headers.extend([(b"cache-control", b"no-store"), (b"x-content-type-options", b"nosniff"), (b"referrer-policy", b"no-referrer"), (b"content-security-policy", b"default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")])
+                headers.extend([(b"cache-control", b"no-store"), (b"x-content-type-options", b"nosniff"), (b"referrer-policy", b"same-origin"), (b"content-security-policy", f"default-src 'none'; form-action {form_action}; frame-ancestors 'none'; base-uri 'none'".encode())])
                 message = {**message, "headers": headers}
             await send(message)
         await self.app(scope, receive, secure_send)
@@ -393,6 +396,6 @@ def create_app(config: RemoteConfig | None = None):
     app.routes.extend([Route("/login", provider.login, methods=["GET", "POST"]), Route("/healthz", lambda request: JSONResponse({"status": "ok"}))])
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlsplit(config.public_url).hostname, "localhost", "127.0.0.1"])
     app.add_middleware(RequestBodyLimitMiddleware, max_body_size=15 * 1024 * 1024)
-    app.add_middleware(SecurityHeaders)
+    app.add_middleware(SecurityHeaders, redirect_uris=config.redirect_uris)
     app.state.oauth_provider = provider
     return app

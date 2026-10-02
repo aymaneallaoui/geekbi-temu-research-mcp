@@ -8,7 +8,7 @@ import anyio
 import httpx
 import pytest
 
-from geekbi_temu_mcp.remote import RemoteConfig, create_app, hash_password
+from geekbi_temu_mcp.remote import DEFAULT_REDIRECTS, RemoteConfig, create_app, hash_password
 
 CALLBACK = "https://claude.ai/api/mcp/auth_callback"
 PASSWORD = "test-password-for-login"
@@ -114,6 +114,39 @@ async def test_login_rate_limit_and_credential_change(remote_config):
     assert [provider.login_limited() for _ in range(11)] == [False] * 10 + [True]
     updated = RemoteConfig(remote_config.public_url, remote_config.email, hash_password("new-strong-password"), remote_config.state_dir, remote_config.redirect_uris)
     assert await OAuthProvider(updated).load_access_token(tokens.access_token) is None
+
+
+@pytest.mark.anyio
+async def test_login_origin_check_matches_browser_headers(remote_config):
+    app = create_app(remote_config)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=remote_config.public_url) as client:
+            credentials = (await register(client)).json()
+            response = await client.get("/authorize", params={"client_id": credentials["client_id"], "redirect_uri": CALLBACK, "response_type": "code", "code_challenge": "a" * 43, "code_challenge_method": "S256", "scope": "temu:read", "resource": remote_config.resource, "state": "s"})
+            login_url = response.headers["location"]
+            page = await client.get(login_url)
+            assert page.headers["referrer-policy"] == "same-origin"
+            form = {"csrf": re.search('name="csrf" value="([^"]+)"', page.text).group(1), "email": "owner@example.com", "password": PASSWORD}
+            for origin in ("null", "https://attacker.example", "https://mcp.example.com.attacker.example"):
+                denied = await client.post(login_url, data=form, headers={"Origin": origin})
+                assert (denied.status_code, denied.text) == (403, "Invalid login origin")
+            accepted = await client.post(login_url, data=form, headers={"Origin": remote_config.public_url})
+            assert accepted.status_code == 303
+            assert accepted.headers["location"].startswith(CALLBACK + "?")
+
+
+@pytest.mark.anyio
+async def test_login_csp_allows_only_callback_origins(tmp_path, monkeypatch):
+    monkeypatch.setenv("GEEKBI_REMOTE_MODE", "0")
+    monkeypatch.setenv("GEEKBI_AUTH_PATH", str(tmp_path / "old-auth.json"))
+    redirects = tuple(DEFAULT_REDIRECTS.split(",")) + ("https://claude.ai/other_callback",)
+    app = create_app(RemoteConfig("https://mcp.example.com", "owner@example.com", hash_password(PASSWORD), tmp_path, redirects))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://mcp.example.com") as client:
+        login_csp = (await client.get("/login?ticket=missing")).headers["content-security-policy"]
+        other_csp = (await client.get("/healthz")).headers["content-security-policy"]
+    assert "form-action 'self' https://claude.ai https://claude.com;" in login_csp
+    assert login_csp.count("https://claude.ai") == 1 and "attacker.example" not in login_csp and "/api/" not in login_csp
+    assert login_csp.replace(" https://claude.ai https://claude.com", "") == other_csp == "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 
 
 def test_configuration_fails_closed(tmp_path):
